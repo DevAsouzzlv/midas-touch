@@ -22,9 +22,9 @@ const credentials = {};
 
 // Configuração WebAuthn (Atenção para Nuvem vs Local)
 const rpName = 'Midas Touch - Aprovação Financeira';
-// Importante: no localhost o rpID é 'localhost'. Na nuvem será o domínio, ex: 'midas-touch.onrender.com'
-const rpID = 'localhost'; 
-const origin = `http://${rpID}:3000`; 
+// Se estiver no Render, pega o domínio automático. Senão, usa localhost.
+const rpID = process.env.RENDER_EXTERNAL_HOSTNAME || 'localhost'; 
+const origin = rpID === 'localhost' ? `http://${rpID}:3000` : `https://${rpID}`; 
 
 // ==============================================
 // 1. REGISTRO (Vincular Biometria)
