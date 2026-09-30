@@ -51,8 +51,7 @@ app.post('/api/register/generate', async (req, res) => {
     const options = await generateRegistrationOptions({
       rpName,
       rpID,
-      userID: user.id, // Em v14, userID deve ser Uint8Array, mas a lib lida com strings se passarmos ou podemos converter
-      // Vamos usar uma conversão segura para array de bytes
+      userID: new Uint8Array(Buffer.from(user.id)),
       userName: user.username,
       attestationType: 'none',
       excludeCredentials: userCredentials.map(cred => ({
