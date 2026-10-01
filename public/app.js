@@ -11,15 +11,25 @@ const displayUser = document.getElementById('display-user');
 
 let currentUser = '';
 
+let isProcessing = false;
+
 // ==========================================
 // 1. REGISTRAR BIOMETRIA
 // ==========================================
 btnRegister.addEventListener('click', async () => {
+  if (isProcessing) return;
+  
   const username = usernameInput.value.trim();
   if (!username) {
     alert('Por favor, digite um e-mail corporativo válido.');
     return;
   }
+
+  isProcessing = true;
+  btnRegister.style.opacity = '0.7';
+  btnRegister.style.cursor = 'not-allowed';
+  const originalText = btnRegister.innerHTML;
+  btnRegister.innerHTML = '<i class="ph ph-spinner animate-spin text-2xl text-midas-400"></i> Aguardando Sensor...';
 
   try {
     // 1.1 Pedir opções de registro para o servidor
@@ -67,6 +77,11 @@ btnRegister.addEventListener('click', async () => {
   } catch (error) {
     console.error(error);
     alert('Ocorreu um erro no cadastro: ' + error.message);
+  } finally {
+    isProcessing = false;
+    btnRegister.style.opacity = '1';
+    btnRegister.style.cursor = 'pointer';
+    btnRegister.innerHTML = originalText;
   }
 });
 
@@ -75,7 +90,13 @@ btnRegister.addEventListener('click', async () => {
 // 2. APROVAR TRANSFERÊNCIA (Autenticação)
 // ==========================================
 btnApprove.addEventListener('click', async () => {
-  if (!currentUser) return;
+  if (!currentUser || isProcessing) return;
+
+  isProcessing = true;
+  btnApprove.style.opacity = '0.7';
+  btnApprove.style.cursor = 'not-allowed';
+  const originalText = btnApprove.innerHTML;
+  btnApprove.innerHTML = '<i class="ph ph-spinner animate-spin text-2xl drop-shadow-md"></i> Verificando...';
 
   try {
     // 2.1 Pedir o Desafio (Challenge) para o servidor
@@ -118,6 +139,11 @@ btnApprove.addEventListener('click', async () => {
   } catch (error) {
     console.error(error);
     alert('Erro na aprovação: ' + error.message);
+  } finally {
+    isProcessing = false;
+    btnApprove.style.opacity = '1';
+    btnApprove.style.cursor = 'pointer';
+    btnApprove.innerHTML = originalText;
   }
 });
 

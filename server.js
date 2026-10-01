@@ -8,46 +8,47 @@ const {
 const cors = require('cors');
 const crypto = require('crypto');
 const path = require('path');
+const helmet = require('helmet'); 
+const rateLimit = require('express-rate-limit'); 
 
 const app = express();
-app.use(express.json());
+
+app.use(helmet()); 
+app.use(express.json({ limit: '10kb' })); 
 app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Banco de dados em memória (ideal para o MVP / Apresentação)
-// users = { userId: { id, username, currentChallenge } }
-const users = {}; 
-// credentials = { userId: [ { id, publicKey, counter, transports } ] }
-const credentials = {}; 
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, 
+  max: 30, 
+  message: { error: 'Muitas requisições originadas deste IP. Tente novamente mais tarde.' }
+});
 
-// Configuração WebAuthn (Atenção para Nuvem vs Local)
+const users = new Map(); 
+const credentials = new Map();
+
 const rpName = 'Midas Touch - Aprovação Financeira';
-// Se estiver no Render, pega o domínio automático. Senão, usa localhost.
 const rpID = process.env.RENDER_EXTERNAL_HOSTNAME || 'localhost'; 
 const origin = rpID === 'localhost' ? `http://${rpID}:3000` : `https://${rpID}`; 
 
-// ==============================================
-// 1. REGISTRO (Vincular Biometria)
-// ==============================================
-
-app.post('/api/register/generate', async (req, res) => {
+app.post('/api/register/generate', apiLimiter, async (req, res) => {
   try {
-    const { username } = req.body;
-    if (!username) return res.status(400).json({ error: 'Username é obrigatório' });
+    let { username } = req.body;
+    if (!username || typeof username !== 'string' || username.length > 100) {
+      return res.status(400).json({ error: 'Payload de entrada inválido.' });
+    }
+    username = username.trim().toLowerCase();
 
-    // Encontra ou cria o usuário
-    let user = Object.values(users).find(u => u.username === username);
+    let user = Array.from(users.values()).find(u => u.username === username);
     if (!user) {
       const newId = crypto.randomBytes(16).toString('base64url');
       user = { id: newId, username };
-      users[newId] = user;
-      credentials[newId] = [];
+      users.set(newId, user);
+      credentials.set(newId, []);
     }
 
-    // Pega as credenciais já cadastradas para não recadastrar
-    const userCredentials = credentials[user.id];
+    const userCredentials = credentials.get(user.id);
 
-    // Gera as opções criptográficas usando a biblioteca
     const options = await generateRegistrationOptions({
       rpName,
       rpID,
@@ -61,27 +62,29 @@ app.post('/api/register/generate', async (req, res) => {
       })),
       authenticatorSelection: {
         residentKey: 'required',
-        userVerification: 'preferred', // Exige biometria ou pin
+        userVerification: 'preferred',
       },
     });
 
-    // Salva o desafio temporário para verificar depois
     user.currentChallenge = options.challenge;
-
     res.json(options);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
+    console.error('[FATAL] Erro na geração de registro:', error.message);
+    res.status(500).json({ error: 'Erro interno ao processar a geração de credenciais.' });
   }
 });
 
-app.post('/api/register/verify', async (req, res) => {
+app.post('/api/register/verify', apiLimiter, async (req, res) => {
   try {
-    const { username, response } = req.body;
-    const user = Object.values(users).find(u => u.username === username);
-    
+    let { username, response } = req.body;
+    if (!username || typeof username !== 'string' || !response) {
+      return res.status(400).json({ error: 'Payload inválido ou incompleto.' });
+    }
+    username = username.trim().toLowerCase();
+
+    const user = Array.from(users.values()).find(u => u.username === username);
     if (!user || !user.currentChallenge) {
-      return res.status(400).json({ error: 'Desafio não encontrado para o usuário' });
+      return res.status(400).json({ error: 'Ciclo de registro inválido ou expirado.' });
     }
 
     const verification = await verifyRegistrationResponse({
@@ -94,37 +97,39 @@ app.post('/api/register/verify', async (req, res) => {
     if (verification.verified && verification.registrationInfo) {
       const { credential } = verification.registrationInfo;
 
-      // Salva a CHAVE PÚBLICA (e nunca a biometria)
-      credentials[user.id].push({
+      credentials.get(user.id).push({
         id: credential.id,
         publicKey: credential.publicKey,
         counter: credential.counter,
         transports: credential.transports,
       });
 
-      user.currentChallenge = null; // Limpa o desafio
+      user.currentChallenge = null;
       res.json({ verified: true });
     } else {
-      res.status(400).json({ error: 'Falha na verificação criptográfica.' });
+      res.status(400).json({ error: 'A validação criptográfica foi rejeitada pelo servidor.' });
     }
   } catch (error) {
-    console.error(error);
-    res.status(400).json({ error: error.message });
+    console.error('[FATAL] Erro na verificação do registro:', error.message);
+    res.status(400).json({ error: 'Falha durante o processo de verificação biométrica.' });
   }
 });
 
-// ==============================================
-// 2. AUTENTICAÇÃO (Aprovar Transferência)
-// ==============================================
-
-app.post('/api/authenticate/generate', async (req, res) => {
+app.post('/api/authenticate/generate', apiLimiter, async (req, res) => {
   try {
-    const { username } = req.body;
-    const user = Object.values(users).find(u => u.username === username);
+    let { username } = req.body;
+    if (!username || typeof username !== 'string') {
+      return res.status(400).json({ error: 'Payload inválido.' });
+    }
+    username = username.trim().toLowerCase();
 
-    if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
+    const user = Array.from(users.values()).find(u => u.username === username);
 
-    const userCredentials = credentials[user.id] || [];
+    if (!user) {
+      return res.status(400).json({ error: 'Processo não pôde ser iniciado. Verifique suas credenciais.' });
+    }
+
+    const userCredentials = credentials.get(user.id) || [];
     
     const options = await generateAuthenticationOptions({
       rpID,
@@ -133,32 +138,36 @@ app.post('/api/authenticate/generate', async (req, res) => {
         type: 'public-key',
         transports: cred.transports,
       })),
-      userVerification: 'preferred', // Exige biometria
+      userVerification: 'preferred',
     });
 
     user.currentChallenge = options.challenge;
-
     res.json(options);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error.message });
+    console.error('[FATAL] Erro na geração de autenticação:', error.message);
+    res.status(500).json({ error: 'Erro de processamento interno.' });
   }
 });
 
-app.post('/api/authenticate/verify', async (req, res) => {
+app.post('/api/authenticate/verify', apiLimiter, async (req, res) => {
   try {
-    const { username, response } = req.body;
-    const user = Object.values(users).find(u => u.username === username);
+    let { username, response } = req.body;
+    if (!username || typeof username !== 'string' || !response) {
+      return res.status(400).json({ error: 'Payload malformado.' });
+    }
+    username = username.trim().toLowerCase();
+
+    const user = Array.from(users.values()).find(u => u.username === username);
 
     if (!user || !user.currentChallenge) {
-      return res.status(400).json({ error: 'Sessão inválida ou desafio expirado' });
+      return res.status(400).json({ error: 'Sessão inválida. O desafio pode ter expirado ou foi sobrescrito.' });
     }
 
-    const userCredentials = credentials[user.id] || [];
+    const userCredentials = credentials.get(user.id) || [];
     const credential = userCredentials.find(c => c.id === response.id);
 
     if (!credential) {
-      return res.status(400).json({ error: 'Aparelho não autorizado/não cadastrado' });
+      return res.status(400).json({ error: 'Credencial biométrica fornecida não está atrelada ao usuário.' });
     }
 
     const verification = await verifyAuthenticationResponse({
@@ -175,22 +184,19 @@ app.post('/api/authenticate/verify', async (req, res) => {
     });
 
     if (verification.verified) {
-      // Atualiza o contador de uso para prevenir clonagem de sessão
       credential.counter = verification.authenticationInfo.newCounter;
       user.currentChallenge = null;
-      res.json({ verified: true, message: 'Transferência Aprovada com Sucesso!' });
+      res.json({ verified: true, message: 'Transferência validada matematicamente.' });
     } else {
-      res.status(400).json({ error: 'Falha ao validar a assinatura biométrica.' });
+      res.status(400).json({ error: 'Inconsistência criptográfica detectada. Assinatura falhou.' });
     }
   } catch (error) {
-    console.error(error);
-    res.status(400).json({ error: error.message });
+    console.error('[FATAL] Erro na verificação da autenticação:', error.message);
+    res.status(400).json({ error: 'Falha fatal na assinatura digital.' });
   }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`\n🚀 Portal "Toque de Midas" no ar!`);
-  console.log(`Acesse: http://localhost:${PORT}`);
-  console.log(`Lembre-se: Para a biometria funcionar, deve ser localhost ou ter HTTPS.\n`);
+  console.log(`\n🚀 [SECURE] Portal "Toque de Midas" (QA Audited) rodando na porta ${PORT}`);
 });
